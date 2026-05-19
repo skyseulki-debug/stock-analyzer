@@ -185,14 +185,20 @@ if analyze_btn:
         else:
             if st.button("Claude AI로 심층 분석하기"):
                 summary = f"종목: {ticker}, 현재가: {float(latest['Close']):,.0f}원 ({change_pct:+.2f}%), RSI: {rsi_val:.1f}, MA5: {float(latest['MA5']):,.0f}, MA20: {float(latest['MA20']):,.0f}, MA60: {float(latest['MA60']):,.0f}, 52주고가: {float(df['High'].max()):,.0f}, 52주저가: {float(df['Low'].min()):,.0f}"
-                with st.spinner("분석 중..."):
+                with st.spinner("분석 중... (최대 30초)"):
                     try:
-                        client = anthropic.Anthropic(api_key=api_key)
+                        import httpx
+                        client = anthropic.Anthropic(
+                            api_key=api_key,
+                            http_client=httpx.Client(timeout=30.0)
+                        )
                         msg = client.messages.create(
                             model="claude-haiku-4-5-20251001",
                             max_tokens=1024,
                             messages=[{"role": "user", "content": f"한국 주식 기술적 분석과 단기·중기 전망을 쉬운 한국어로 설명해줘:\n{summary}"}]
                         )
                         st.success(msg.content[0].text)
+                    except httpx.TimeoutException:
+                        st.error("⏱️ 응답 시간 초과(30초). 잠시 후 다시 시도해주세요.")
                     except Exception as e:
                         st.error(f"AI 분석 오류: {e}")

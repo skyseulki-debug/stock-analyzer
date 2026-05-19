@@ -1,45 +1,48 @@
 import streamlit as st
-import yfinance as yf
+import FinanceDataReader as fdr
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import anthropic
 import httpx
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="한국 주식 분석기", page_icon="📈", layout="wide")
 st.title("📈 한국 주식 차트 분석기")
 
-# 세션 상태 초기화 (페이지 재실행해도 데이터 유지)
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "ticker" not in st.session_state:
-    st.session_state.ticker = None
+# 세션 상태 초기화
+for key in ["df", "ticker", "last_updated"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+# 기간 → 날짜 변환
+period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730}
 
 # 사이드바
 with st.sidebar:
     st.header("설정")
-    ticker_input = st.text_input("종목코드", "005930", help="예: 005930(삼성전자), 035720(카카오), 000660(SK하이닉스)")
-    market = st.radio("시장 선택", ["KOSPI (코스피)", "KOSDAQ (코스닥)"])
-    period = st.select_slider("조회 기간", ["1mo", "3mo", "6mo", "1y", "2y"], value="3mo",
+    ticker_input = st.text_input("종목코드", "005930",
+                                  help="예: 005930(삼성전자), 035720(카카오), 000660(SK하이닉스)")
+    period = st.select_slider("조회 기간", list(period_days.keys()), value="3mo",
                                format_func=lambda x: {"1mo":"1개월","3mo":"3개월","6mo":"6개월","1y":"1년","2y":"2년"}[x])
-    api_key = st.text_input("Anthropic API 키 (AI 전망용)", type="password",
-                             help="https://console.anthropic.com 에서 발급")
-    analyze_btn = st.button("분석 시작", type="primary", use_container_width=True)
+    api_key = st.text_input("Anthropic API 키 (AI 전망용)", type="password")
+
+    analyze_btn  = st.button("분석 시작", type="primary", use_container_width=True)
+    refresh_btn  = st.button("새로고침", use_container_width=True,
+                              help="최신 데이터로 업데이트")
+
+    if st.session_state.last_updated:
+        st.caption(f"마지막 업데이트: {st.session_state.last_updated}")
 
 st.caption("인기 종목: 005930(삼성전자) · 000660(SK하이닉스) · 035720(카카오) · 005380(현대차) · 035420(NAVER)")
 
-# 분석 시작 버튼 누르면 데이터 로드 후 세션에 저장
-if analyze_btn:
-    suffix = ".KS" if "KOSPI" in market else ".KQ"
-    ticker = ticker_input.strip() + suffix
-    with st.spinner("데이터 불러오는 중..."):
-        raw = yf.download(ticker, period=period, progress=False)
-    if raw.empty:
-        st.error("데이터를 찾을 수 없습니다. 종목코드와 시장 구분을 확인해주세요.")
-        st.stop()
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-    df = raw[["Open","High","Low","Close","Volume"]].copy()
+def load_data(ticker_input, period):
+    """FinanceDataReader로 주가 데이터 로드"""
+    start = (datetime.now() - timedelta(days=period_days[period])).strftime("%Y-%m-%d")
+    df = fdr.DataReader(ticker_input.strip(), start)
+    if df.empty:
+        return None
+    df = df[["Open","High","Low","Close","Volume"]].copy()
     df["MA5"]  = df["Close"].rolling(5).mean()
     df["MA20"] = df["Close"].rolling(20).mean()
     df["MA60"] = df["Close"].rolling(60).mean()
@@ -47,12 +50,22 @@ if analyze_btn:
     gain  = delta.clip(lower=0).rolling(14).mean()
     loss  = (-delta.clip(upper=0)).rolling(14).mean()
     df["RSI"] = 100 - (100 / (1 + gain / loss))
-    st.session_state.df = df
-    st.session_state.ticker = ticker
+    return df
 
-# 세션에 데이터가 있으면 차트 표시
+# 분석 시작 또는 새로고침
+if analyze_btn or refresh_btn:
+    with st.spinner("데이터 불러오는 중..."):
+        df = load_data(ticker_input, period)
+    if df is None:
+        st.error("데이터를 찾을 수 없습니다. 종목코드를 확인해주세요.")
+        st.stop()
+    st.session_state.df = df
+    st.session_state.ticker = ticker_input.strip()
+    st.session_state.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# 데이터가 있으면 표시
 if st.session_state.df is not None:
-    df = st.session_state.df
+    df     = st.session_state.df
     ticker = st.session_state.ticker
 
     # 차트
@@ -61,12 +74,14 @@ if st.session_state.df is not None:
                         subplot_titles=["캔들 차트 + 이동평균선", "거래량", "RSI"])
     fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"],
                                   low=df["Low"], close=df["Close"],
-                                  increasing_line_color="red", decreasing_line_color="blue", name="주가"), row=1, col=1)
-    for col, color, name in [("MA5","orange","5일"), ("MA20","green","20일"), ("MA60","purple","60일")]:
-        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=f"MA{name}",
+                                  increasing_line_color="red", decreasing_line_color="blue",
+                                  name="주가"), row=1, col=1)
+    for col, color, lname in [("MA5","orange","5일"), ("MA20","green","20일"), ("MA60","purple","60일")]:
+        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=f"MA{lname}",
                                   line=dict(color=color, width=1.2)), row=1, col=1)
     bar_colors = ["red" if c >= o else "blue" for c, o in zip(df["Close"], df["Open"])]
-    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=bar_colors, showlegend=False), row=2, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=bar_colors,
+                          showlegend=False), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
                               line=dict(color="darkorange", width=1.5)), row=3, col=1)
     fig.add_hrect(y0=70, y1=100, fillcolor="red",  opacity=0.05, row=3, col=1)
@@ -78,8 +93,8 @@ if st.session_state.df is not None:
     st.plotly_chart(fig, use_container_width=True)
 
     # 핵심 지표
-    latest = df.iloc[-1]
-    prev   = df.iloc[-2]
+    latest     = df.iloc[-1]
+    prev       = df.iloc[-2]
     change_pct = float((latest["Close"] - prev["Close"]) / prev["Close"] * 100)
     rsi_val    = float(latest["RSI"])
     rsi_label  = "과매수" if rsi_val > 70 else "과매도" if rsi_val < 30 else "중립"
@@ -93,7 +108,7 @@ if st.session_state.df is not None:
 
     st.divider()
 
-    # 자동 분석
+    # 자동 차트 분석
     st.subheader("자동 차트 분석 및 전망")
 
     def auto_analyze(df, latest, rsi_val, change_pct):
@@ -130,7 +145,7 @@ if st.session_state.df is not None:
             lines.append(f"RSI {rsi_val:.1f} — **중립** 구간. 과열도 침체도 아닌 안정적인 상태입니다.")
 
         if pos52 >= 90:
-            lines.append(f"52주 범위 **{pos52:.0f}% 위치** — 신고가 근처. 강한 모멘텀이나 고점 리스크에 주의하세요.")
+            lines.append(f"52주 범위 **{pos52:.0f}% 위치** — 신고가 근처. 고점 리스크에 주의하세요.")
         elif pos52 <= 10:
             lines.append(f"52주 범위 **{pos52:.0f}% 위치** — 저점 구간. 추가 하락 가능성도 열려 있습니다.")
         else:

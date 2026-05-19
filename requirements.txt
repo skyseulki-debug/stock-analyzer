@@ -1,5 +1,6 @@
 streamlit
-yfinance
+finance-datareader
 plotly
 pandas
 anthropic
+httpx

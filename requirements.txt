@@ -4,3 +4,4 @@ plotly
 pandas
 anthropic
 httpx
+pykrx
